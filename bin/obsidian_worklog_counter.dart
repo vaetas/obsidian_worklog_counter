@@ -20,6 +20,19 @@ import 'dart:io';
 ///   dart run obsidian_worklog_counter.dart <file.md> --month "February '26"
 ///   dart run obsidian_worklog_counter.dart <file.md> --json
 ///   dart run obsidian_worklog_counter.dart <file.md> --month "February '26" --json
+/// Thrown when a line looks like `- [CODE] ...` but does not end with `[Nh]`.
+class InvalidProjectLineException implements Exception {
+  InvalidProjectLineException({required this.lineNumber, required this.line});
+
+  final int lineNumber;
+  final String line;
+
+  @override
+  String toString() =>
+      'Line $lineNumber: project entry must end with hours like [8h]. '
+      'Found: ${line.trim()}';
+}
+
 void main(List<String> args) async {
   if (args.isEmpty) {
     stderr.writeln(
@@ -52,7 +65,13 @@ void main(List<String> args) async {
 
   final lines = await file.readAsLines();
 
-  final totals = _sumHoursByProject(lines, monthFilter: monthFilter);
+  final Map<String, double> totals;
+  try {
+    totals = _sumHoursByProject(lines, monthFilter: monthFilter);
+  } on InvalidProjectLineException catch (e) {
+    stderr.writeln('Error: $e');
+    exit(1);
+  }
   if (totals.isEmpty) {
     stderr.writeln(
       'No project hours found.'
@@ -65,9 +84,7 @@ void main(List<String> args) async {
     // Lightweight JSON without extra deps.
     final keys = totals.keys.toList()..sort();
     final json =
-        '{' +
-        keys.map((k) => '"$k": ${_formatDouble(totals[k]!)}').join(', ') +
-        '}';
+        '{${keys.map((k) => '"$k": ${_formatDouble(totals[k]!)}').join(', ')}}';
     stdout.writeln(json);
   } else {
     final keys = totals.keys.toList()..sort();
@@ -98,6 +115,8 @@ Map<String, double> _sumHoursByProject(
   final projectLineRe = RegExp(
     r'^\s*-\s*\[([A-Za-z0-9_-]+)\]\s*(.*?)\s*\[\s*([0-9]*\.?[0-9]+)\s*h\s*\]\s*$',
   );
+  // Same prefix as a project line; used to detect malformed entries.
+  final projectLinePrefixRe = RegExp(r'^\s*-\s*\[([A-Za-z0-9_-]+)\]\s*');
 
   bool inSelectedMonth = false;
   bool monthSelectedAtLeastOnce = false;
@@ -106,7 +125,9 @@ Map<String, double> _sumHoursByProject(
 
   final totals = <String, double>{};
 
-  for (final rawLine in lines) {
+  for (var i = 0; i < lines.length; i++) {
+    final rawLine = lines[i];
+    final lineNumber = i + 1;
     final line = rawLine.replaceAll(
       '\u00A0',
       ' ',
@@ -137,6 +158,10 @@ Map<String, double> _sumHoursByProject(
     // (Optional) Validate we're within date blocks. Not strictly needed for summing.
     if (dateLineRe.hasMatch(line)) {
       continue;
+    }
+
+    if (projectLinePrefixRe.hasMatch(line) && !projectLineRe.hasMatch(line)) {
+      throw InvalidProjectLineException(lineNumber: lineNumber, line: rawLine);
     }
 
     final pm = projectLineRe.firstMatch(line);
